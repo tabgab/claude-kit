@@ -18,8 +18,8 @@ My own additions on top of the original (version `1.2.0-local.1`):
 
 - **Main row**: the agents panel starts with a "Main" row for the main agent: model and effort, working (with the tool in use, or thinking or writing) or idle, requests this turn, turn time, context fill, and an estimated cost. The context figures come from the engine, not a guess. The header totals include the main agent, and the clock shows the session's time when that is longer.
 - **Main self-reported steps**: the `step` tool now also works for the main agent (no `agentId`). It draws a bar in the Main row, and, while the main agent works and no flow is running, in the band above the prompt.
-- **Advisor row**: an "Advisor" row appears under Main once the advisor tool has been called: call count, consulting or idle, and the last call's duration. It counts the call from `tool.call` and, as a fallback, from the model's stream.
-- **`/savvy-diag`**: lists the tool names seen on the main loop (from `tool.call` and from the stream), the number of opaque engine chunks, and the advisor state. Use it to see which channel the advisor reaches the mod through.
+- **Advisor row**: an "Advisor" row appears under Main once the advisor tool has been called: call count and the last call's duration. The advisor is a server tool: the API runs it inside the request, so it never reaches `tool.call` or the stream's tool chunks. The mod counts it from the step result's `serverToolUses`, once per call id. For the same reason the row cannot show "consulting" while a call runs.
+- **`/savvy-diag`**: lists the tool names seen on the main loop (from `tool.call` and from the stream), the number of opaque engine chunks, and the advisor's call count, state, channel (`result` when counted from the step result) and last duration. Use it to check that the advisor is counted.
 - **Auto-open**: the panel opens by itself when an interactive session starts.
 
 Tests are in `tests/main-row.test.tsx`; run them with `claude plugin test`.
