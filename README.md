@@ -5,9 +5,21 @@ My public skills and mods for [Claude Code](https://claude.com/claude-code), in 
 | Plugin | Type | What it does |
 | --- | --- | --- |
 | [savvy-flow](plugins/savvy-flow) | skill + agents | `/savvy-flow <task>`: the session model plans, delegates to tiered worker subagents and reviews their work. |
-| [savvy-progress](plugins/savvy-progress) | mod | A progress bar above the prompt and a live agents panel. Made for savvy-flow, shows any subagents. |
+| [savvy-progress](plugins/savvy-progress) | mod | A progress bar above the prompt and a live agents panel. Made for savvy-flow, shows any subagents. **Changed in this fork.** |
 
 savvy-flow and savvy-progress work on their own and light up together: with both installed, the flow drives the bar and workers report their progress to the panel.
+
+## This fork
+
+This is a fork of [johnnyvizz/claude-kit](https://github.com/johnnyvizz/claude-kit). It changes **savvy-progress** only (version `1.2.0-local.1`). savvy-flow is unchanged.
+
+- **Main row:** the agents panel shows the main agent: model and effort, what it is doing, requests, turn time, context fill and an estimated cost.
+- **Main agent steps:** the `step` tool also works for the main agent and draws its progress in the Main row and above the prompt.
+- **Advisor row:** the number of advisor calls and the last call's duration, counted from the step result, because the advisor never reaches `tool.call`.
+- **`/savvy-diag`:** shows which tools the mod sees on the main loop, and how it counts the advisor.
+- **Auto-open:** the agents panel opens when an interactive session starts.
+
+The details and the tests are in [plugins/savvy-progress/README.md](plugins/savvy-progress/README.md#local-changes).
 
 ## Install
 
