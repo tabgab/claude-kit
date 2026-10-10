@@ -40,6 +40,38 @@ export type AgentRun = {
   stepNote?: string
 }
 
+export type Main = {
+  model: string
+  effort?: string
+  status: 'working' | 'idle'
+  sessionStartedAt: number
+  turnStartedAt?: number
+  lastTurnMs?: number
+  /** Model requests in the current turn. */
+  requests: number
+  /** The tool now being called, or 'thinking' or 'writing'. */
+  activity: string
+  contextTokens?: number
+  contextWindow?: number
+  contextPercent?: number
+  tokens: number
+  costUsd: number
+  /** The session total from the engine, subagents included. */
+  sessionCostUsd?: number
+  /** Self-reported by the main agent through the `step` tool. */
+  stepDone?: number
+  stepTotal?: number
+  stepNote?: string
+}
+
+export type Advisor = {
+  calls: number
+  status: 'idle' | 'consulting'
+  startedAt?: number
+  lastMs?: number
+  channel?: 'tool.call' | 'stream' | 'result'
+}
+
 export type Panel = {
   isCompact: boolean
   isDoneCollapsed: boolean
@@ -53,6 +85,8 @@ declare module 'claude-code' {
       agents: AgentRun[]
       panel: Panel
       now: number
+      main: Main
+      advisor: Advisor
     }
   }
 }

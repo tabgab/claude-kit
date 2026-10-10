@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, TurnStepChunk, TurnStepServerToolUse } from 'claude-code'
 
-import type { AgentRun, Flow, Panel, Phase, PlannedTask } from '../types'
+import type { Advisor, AgentRun, Flow, Main, Panel, Phase, PlannedTask } from '../types'
 
 const flow = atom({ plugin: 'savvy-progress', key: 'flow' } as const, null)
 const agents = atom({ plugin: 'savvy-progress', key: 'agents' } as const, [])
@@ -11,6 +11,9 @@ const panel = atom({ plugin: 'savvy-progress', key: 'panel' } as const, {
   autoOpenedFor: '',
 })
 const now = atom({ plugin: 'savvy-progress', key: 'now' } as const, 0)
+const blankMain = (): Main => ({ model: '', status: 'idle', sessionStartedAt: 0, requests: 0, activity: '', tokens: 0, costUsd: 0 })
+const main = atom({ plugin: 'savvy-progress', key: 'main' } as const, blankMain())
+const advisor = atom({ plugin: 'savvy-progress', key: 'advisor' } as const, { calls: 0, status: 'idle' })
 
 const TOOL = 'mcp__savvy-progress__progress'
 const STEP_TOOL = 'mcp__savvy-progress__step'
@@ -62,6 +65,15 @@ const STRINGS = {
     tasks: 'Tasks',
     review: 'Review',
     busy: 'running',
+    main: 'Main',
+    advisor: 'Advisor',
+    working: 'working',
+    idle: 'idle',
+    requests: 'req',
+    calls: 'calls',
+    consulting: 'consulting',
+    last: 'last',
+    session: 'session',
   },
   ru: {
     pane: 'Агенты',
@@ -90,6 +102,15 @@ const STRINGS = {
     tasks: 'Задачи',
     review: 'Ревью',
     busy: 'в работе',
+    main: 'Главный',
+    advisor: 'Советник',
+    working: 'работает',
+    idle: 'ждёт',
+    requests: 'запр.',
+    calls: 'вызовов',
+    consulting: 'советуется',
+    last: 'последний',
+    session: 'сессия',
   },
 } as const
 
@@ -366,12 +387,31 @@ const plannedOf = (f: Flow | null, list: AgentRun[]): Planned[] => {
   return (f.tasks ?? []).map((t, i) => ({ ...t, n: i + 1 })).filter(t => !started.has(norm(t.title)))
 }
 
-const totals = (list: AgentRun[], at: number) => {
-  const cost = list.reduce((s, a) => s + a.costUsd, 0)
-  const tokens = list.reduce((s, a) => s + a.tokens, 0)
+const totals = (list: AgentRun[], at: number, m: Main) => {
+  const cost = list.reduce((s, a) => s + a.costUsd, 0) + m.costUsd
+  const tokens = list.reduce((s, a) => s + a.tokens, 0) + m.tokens
   const start = Math.min(...list.map(a => a.startedAt))
   const end = Math.max(...list.map(a => a.endedAt ?? Math.max(at, a.startedAt)))
-  return { cost, tokens, time: list.length ? end - start : 0 }
+  const agentsTime = list.length ? end - start : 0
+  // The session's own clock wins when it is longer.
+  const sessionTime = m.sessionStartedAt ? Math.max(0, at - m.sessionStartedAt) : 0
+  return { cost, tokens, time: Math.max(agentsTime, sessionTime) }
+}
+
+// What the main row shows, shared by the desktop and terminal drawings.
+const mainView = (m: Main, at: number) => {
+  const s = tr()
+  const window = m.contextWindow ?? windowOf(m.model)
+  const tokens = m.contextTokens ?? 0
+  const ctx = m.contextPercent ?? (window ? Math.min(100, Math.round((tokens / window) * 100)) : 0)
+  const isWorking = m.status === 'working'
+  const time = isWorking && m.turnStartedAt !== undefined ? Math.max(at, m.turnStartedAt) - m.turnStartedAt : (m.lastTurnMs ?? 0)
+  const progress = m.stepTotal ? Math.min(1, (m.stepDone ?? 0) / m.stepTotal) : null
+  const steps = m.stepTotal ? `${m.stepDone ?? 0}/${m.stepTotal}${m.stepNote ? ' · ' + m.stepNote : ''}` : ''
+  const model = m.model ? (m.effort ? `${modelName(m.model)} · ${m.effort}` : modelName(m.model)) : '—'
+  const state = isWorking ? `${s.working}${m.activity ? ' · ' + m.activity : ''}` : s.idle
+  const session = m.sessionCostUsd !== undefined ? ` (${s.session} ${fmtCost(m.sessionCostUsd)})` : ''
+  return { ctx, tokens, isWorking, time, progress, steps, model, state, session, requests: `${m.requests} ${s.requests}` }
 }
 
 // --- desktop drawings: each row is one SVG, as the band above the prompt is.
@@ -573,6 +613,50 @@ ${statusMark(W - 8, 16, a.status, color)}
   )
 }
 
+const mainSvg = (W: number, m: Main, at: number): string => {
+  const s = tr()
+  const v = mainView(m, at)
+  const color = colorOf('fable')
+  const textW = W - 42 - 22
+  const stats = `ctx ${v.ctx}% · ${fmtTokens(v.tokens)}  ≈${fmtCost(m.costUsd)}${v.session}  ${fmtTime(v.time)}`
+  const stepsW = Math.max(0, textW - textWidth(stats, 11) - 12)
+  // Without reported steps the bar falls back to the context, drawn grey.
+  const fillW = Math.round(textW * (v.progress ?? v.ctx / 100))
+  return svg(
+    W,
+    66,
+    `${crab(0, 14, 'fable', false, v.isWorking)}
+<text class="t" x="42" y="18" font-family="${FONT}" font-size="13" font-weight="600">${xml(s.main)}</text>
+<text x="42" y="34" font-family="${FONT}" font-size="11"><tspan fill="${color}">${xml(v.model)}</tspan><tspan class="s">  ${xml(`${v.state}  ·  ${v.requests}`)}</tspan></text>
+${v.steps && stepsW > 30 ? `<text class="t" x="42" y="49" font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(fitText(v.steps, 11, stepsW))}</text>` : ''}
+<text class="s" x="${42 + textW}" y="49" text-anchor="end" font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(stats)}</text>
+<rect class="k" x="42" y="55" width="${textW}" height="4" rx="2"/><rect${v.progress === null ? ' class="m"' : ''} x="42" y="55" width="${fillW}" height="4" rx="2"${v.progress === null ? '' : ` fill="${color}"`}/>
+${statusMark(W - 8, 16, v.isWorking ? 'running' : 'done', color)}
+<line class="ln" x1="0" y1="65.5" x2="${W}" y2="65.5"/>`,
+  )
+}
+
+const advisorLine = (a: Advisor, at: number): string => {
+  const s = tr()
+  const isBusy = a.status === 'consulting'
+  const parts = [`${a.calls} ${s.calls}`, isBusy ? s.consulting : s.idle]
+  if (isBusy && a.startedAt !== undefined) parts.push(fmtTime(Math.max(at, a.startedAt) - a.startedAt))
+  else if (a.lastMs !== undefined) parts.push(`${s.last} ${fmtTime(a.lastMs)}`)
+  return parts.join(' · ')
+}
+
+const advisorSvg = (W: number, a: Advisor, at: number): string => {
+  const color = colorOf('careful')
+  return svg(
+    W,
+    40,
+    `<text class="t" x="0" y="18" font-family="${FONT}" font-size="13" font-weight="600">${xml(tr().advisor)}</text>
+<text class="s" x="0" y="33" font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(fitText(advisorLine(a, at), 11, W - 22))}</text>
+${statusMark(W - 8, 16, a.status === 'consulting' ? 'running' : 'done', color)}
+<line class="ln" x1="0" y1="39.5" x2="${W}" y2="39.5"/>`,
+  )
+}
+
 const plannedSvg = (W: number, p: Planned): string => {
   const tier = p.tier in TIER_COLOR ? p.tier : 'other'
   const color = colorOf(tier)
@@ -640,10 +724,80 @@ async function autoOpen($: EngineInterface, key: string): Promise<void> {
   void $.ui.open({ id: PANE, title: tr().pane })
 }
 
+// Counts of tool names seen on the main loop, by channel, for /savvy-diag.
+const diag = { call: {} as Record<string, number>, stream: {} as Record<string, number>, engine: 0 }
+const bump = (m: Record<string, number>, k: string): void => {
+  m[k] = (m[k] ?? 0) + 1
+}
+// Advisor calls already counted, by tool_use_id, so a call counts once.
+const advisorIds = new Set<string>()
+// The last activity written, so a chunk only writes state when the label changes.
+let lastActivity = ''
+
+const diagText = (a: Advisor): string => {
+  const list = (m: Record<string, number>) =>
+    Object.entries(m)
+      .map(([k, n]) => `${k} ${n}`)
+      .join(', ') || '-'
+  return [
+    `tool.call (main): ${list(diag.call)}`,
+    `stream tool chunks (main): ${list(diag.stream)}`,
+    `engine chunks (main): ${diag.engine}`,
+    `advisor: ${a.calls} calls, ${a.status}, channel ${a.channel ?? '-'}${a.lastMs !== undefined ? `, last ${a.lastMs} ms` : ''}`,
+  ].join('\n')
+}
+
+const activityOf = (name: string): string => name.replace(/^mcp__.*__/, '')
+
+// The API runs the advisor inside the request: no tool.call chain and no tool chunk,
+// only the step's result lists it, with its start and end.
+async function countServerAdvisor($: EngineInterface, uses: readonly TurnStepServerToolUse[] | undefined): Promise<void> {
+  for (const use of uses ?? []) {
+    if (use.name !== 'advisor' || advisorIds.has(use.id)) continue
+    advisorIds.add(use.id)
+    await update($, advisor, a => ({
+      ...a,
+      calls: a.calls + 1,
+      lastMs: use.endedAt !== undefined ? use.endedAt - use.startedAt : a.lastMs,
+      channel: 'result' as const,
+    }))
+  }
+}
+
+// One chunk of a main-loop step: the activity label and the diagnostics.
+async function observe($: EngineInterface, c: TurnStepChunk): Promise<void> {
+  let activity = ''
+  if (c.kind === 'tool') {
+    bump(diag.stream, c.name)
+    activity = activityOf(c.name)
+  } else if (c.kind === 'thinking') activity = 'thinking'
+  else if (c.kind === 'text') activity = 'writing'
+  else if (c.kind === 'engine') diag.engine++
+  if (!activity || activity === lastActivity) return
+  lastActivity = activity
+  await update($, main, m => ({ ...m, activity }))
+}
+
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     lang = await detectLang($, options.language)
+    const startAt = await $.clock.now()
+    await update($, main, m => ({ ...m, sessionStartedAt: m.sessionStartedAt || startAt }))
+    try {
+      const model = await $.session.model()
+      const { context, cost } = await $.session.usage()
+      await update($, main, m => ({
+        ...m,
+        model: m.model || String(model),
+        contextTokens: context.tokens ?? m.contextTokens,
+        contextWindow: context.window,
+        contextPercent: context.percent ?? m.contextPercent,
+        sessionCostUsd: cost?.usd ?? m.sessionCostUsd,
+      }))
+    } catch {
+      // No session to ask yet: the first turn fills these in.
+    }
     await $.tool.register({
       name: 'progress',
       description:
@@ -678,9 +832,9 @@ export const register: Register = (on, options) => {
     await $.tool.register({
       name: 'step',
       description:
-        'For savvy-flow workers: report progress on your own task to the agents panel. ' +
-        'Right after reading the brief, call it with `total` (your plan in 3-8 steps) and `done: 0`; ' +
-        'call it again as each step finishes. Cheap and silent: it only draws a bar.',
+        'Report progress on your own task to the agents panel. ' +
+        'The main agent: call it on any task with three or more steps, with `total` and `done: 0` once the plan is clear, then after each step. ' +
+        'Subagents: call it right after reading the brief, then after each step. Cheap and silent: it only draws a bar.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -695,22 +849,47 @@ export const register: Register = (on, options) => {
       name: 'agents-info',
       description: 'Show or hide the panel of subagents: running, finished and planned, with model, context, cost and time',
     })
+    await $.command.register({
+      name: 'savvy-diag',
+      description: 'Show which tool names the mod saw on the main loop, and the advisor state',
+    })
 
     // Ticks the running agents' clocks; quiet when nothing runs.
     $.clock.every(1000, () => {
       void (async () => {
         const list = await read($, agents)
-        if (!list.some(a => a.status === 'running')) return
+        const isBusy = list.some(a => a.status === 'running') || (await read($, main)).status === 'working' || (await read($, advisor)).status === 'consulting'
+        if (!isBusy) return
         const at = await $.clock.now()
         await update($, now, () => at)
       })()
     })
+
+    // Show the panel at the start of an interactive session.
+    if (e.isInteractive && e.surface !== null) {
+      try {
+        if (!(await $.ui.panes()).some(p => p.id === PANE)) {
+          await update($, now, () => startAt)
+          void $.ui.open({ id: PANE, title: tr().pane }).catch(() => {})
+        }
+      } catch {
+        // No pane to open here.
+      }
+    }
     return started
   })
+
+  on('command.run', { command: 'savvy-diag' }, async $ => ({ text: diagText(await read($, advisor)) }))
 
   on('command.run', { command: 'agents-info' }, async $ => {
     const isOpen = await togglePane($)
     return { text: isOpen ? tr().opened : tr().closed }
+  })
+
+  // Counts tool names on the main loop; always lets the call run.
+  on('tool.call', async ($, e, next) => {
+    if (!e.agentId) bump(diag.call, e.tool)
+    return next(e)
   })
 
   on('tool.call', { tool: TOOL }, async ($, e) => {
@@ -729,7 +908,14 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: STEP_TOOL }, async ($, e) => {
     const input = e as unknown as { done?: number; total?: number; note?: string }
     const agentId = e.agentId
-    if (!agentId) return { result: 'ignored: only subagents report steps' }
+    if (!agentId) {
+      await update($, main, m => {
+        const total = Math.max(0, Math.round(input.total ?? m.stepTotal ?? 0))
+        const done = Math.max(0, Math.round(input.done ?? m.stepDone ?? 0))
+        return { ...m, stepTotal: total, stepDone: total ? Math.min(total, done) : done, stepNote: input.note?.trim() || undefined }
+      })
+      return { result: 'ok' }
+    }
     await update($, agents, list =>
       list.map(a => {
         if (a.agentId !== agentId) return a
@@ -791,9 +977,41 @@ export const register: Register = (on, options) => {
 
   // Each model request of a subagent: live context, tokens and cost.
   on('turn.step', async function* ($, e, next) {
-    const result = yield* next(e)
     const agentId = e.agentId
+    if (!agentId) {
+      await update($, main, m => ({
+        ...m,
+        status: 'working',
+        model: e.model,
+        effort: typeof e.effort === 'string' ? e.effort : m.effort,
+        requests: e.index + 1,
+      }))
+    }
+    // Iterate by hand to see each chunk; every chunk goes up unchanged.
+    const stream = next(e)
+    let r = await stream.next()
+    while (!r.done) {
+      if (!agentId) await observe($, r.value)
+      yield r.value
+      r = await stream.next()
+    }
+    const result = r.value
+    if (!agentId) await countServerAdvisor($, result.serverToolUses)
     const usage = result.usage
+    if (!agentId && usage) {
+      const model = usage.model || e.model
+      await update($, main, m => ({
+        ...m,
+        model,
+        tokens:
+          m.tokens +
+          (usage.input_tokens || 0) +
+          (usage.output_tokens || 0) +
+          (usage.cache_read_input_tokens || 0) +
+          (usage.cache_creation_input_tokens || 0),
+        costUsd: m.costUsd + costOf(model, usage),
+      }))
+    }
     if (!agentId || !usage) return result
 
     const model = usage.model || e.model
@@ -827,8 +1045,44 @@ export const register: Register = (on, options) => {
     return result
   })
 
+  on('turn.start', async ($, e, next) => {
+    const at = await $.clock.now()
+    lastActivity = ''
+    await update($, main, m => ({
+      ...m,
+      status: 'working',
+      turnStartedAt: at,
+      sessionStartedAt: m.sessionStartedAt || at,
+      requests: 0,
+      activity: '',
+      stepDone: undefined,
+      stepTotal: undefined,
+      stepNote: undefined,
+    }))
+    await update($, now, () => at)
+    return next(e)
+  })
+
+  // Context and session cost as the engine measures them after each main turn.
+  on('session.measure', async ($, e, next) => {
+    await update($, main, m => ({
+      ...m,
+      contextTokens: e.context.tokens ?? m.contextTokens,
+      contextWindow: e.context.window,
+      contextPercent: e.context.percent ?? m.contextPercent,
+      sessionCostUsd: e.cost?.usd ?? m.sessionCostUsd,
+    }))
+    return next(e)
+  })
+
   on('turn.complete', async ($, e, next) => {
     const agentId = e.agentId
+    if (!agentId) {
+      const at = await $.clock.now()
+      lastActivity = ''
+      await update($, main, m => ({ ...m, status: 'idle', lastTurnMs: e.durationMs, activity: '' }))
+      await update($, now, () => at)
+    }
     if (agentId) {
       const at = await $.clock.now()
       await update($, agents, list =>
@@ -866,12 +1120,15 @@ export const register: Register = (on, options) => {
     const list = await read($, agents)
     const f = await read($, flow)
     const p: Panel = await read($, panel)
-    const at = Math.max(await read($, now), ...list.map(a => a.startedAt), 0)
+    const m = await read($, main)
+    const adv = await read($, advisor)
+    const at = Math.max(await read($, now), ...list.map(a => a.startedAt), m.turnStartedAt ?? 0, 0)
+    const hasAdvisor = adv.calls > 0 || adv.status === 'consulting'
 
     const running = list.filter(a => a.status === 'running').reverse()
     const finished = list.filter(a => a.status !== 'running').reverse()
     const planned = plannedOf(f, list)
-    const t = totals(list, at)
+    const t = totals(list, at, m)
     // The pane's title says "Agents"; inside, only the flow's own name.
     const title = f && !f.isFinished ? f.title : ''
 
@@ -906,6 +1163,8 @@ export const register: Register = (on, options) => {
       if (p.isCompact) {
         return (
           <Box flexDirection="column" gap={1}>
+            <Svg source={mainSvg(W, m, at)} alt={`${s.main}: ${mainView(m, at).state}`} width={W} height={66} />
+            {hasAdvisor && <Svg source={advisorSvg(W, adv, at)} alt={`${s.advisor}: ${advisorLine(adv, at)}`} width={W} height={40} />}
             <Svg source={compactSvg(W, list, planned, t)} alt={`${list.length} ${s.agentsCount}, ${summary}`} width={W} height={32} />
             {toggleCompact}
           </Box>
@@ -915,6 +1174,8 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column">
           <Svg source={headerSvg(W, title, t)} alt={title ? `${title}: ${summary}` : summary} width={W} height={headerHeight(title)} />
           {toggleCompact}
+          <Svg source={mainSvg(W, m, at)} alt={`${s.main}: ${mainView(m, at).state}`} width={W} height={66} />
+          {hasAdvisor && <Svg source={advisorSvg(W, adv, at)} alt={`${s.advisor}: ${advisorLine(adv, at)}`} width={W} height={40} />}
           {isEmpty && <Text dimColor>{s.empty}</Text>}
           {running.length > 0 && section('h-run', `${s.running} · ${running.length}`)}
           {running.map(a => (
@@ -969,6 +1230,43 @@ export const register: Register = (on, options) => {
       )
     }
 
+    const mv = mainView(m, at)
+    const mainRow = (
+      <Box key="main" flexDirection="column" marginBottom={1}>
+        <Box flexDirection="row" gap={1}>
+          <Text color={colorOf('fable')}>▣</Text>
+          <Text bold>{s.main}</Text>
+          <Text color={mv.isWorking ? colorOf('fable') : 'green'}>{mv.isWorking ? '●' : '✓'}</Text>
+        </Box>
+        <Text dimColor wrap="truncate-end">
+          {'  '}
+          {mv.model} · {mv.state} · {mv.requests}
+        </Text>
+        <Text wrap="truncate-end">
+          {'  '}
+          {mv.progress === null ? <Text dimColor>{ctxBar(mv.ctx, barW)}</Text> : <Text color={colorOf('fable')}>{ctxBar(mv.progress * 100, barW)}</Text>}
+          <Text dimColor>
+            {' '}
+            {mv.steps ? mv.steps + ' · ' : ''}ctx {mv.ctx}% · {fmtTokens(mv.tokens)} ≈{fmtCost(m.costUsd)}
+            {mv.session} {fmtTime(mv.time)}
+          </Text>
+        </Text>
+      </Box>
+    )
+    const advisorRow = hasAdvisor && (
+      <Box key="advisor" flexDirection="column" marginBottom={1}>
+        <Box flexDirection="row" gap={1}>
+          <Text color={colorOf('careful')}>▣</Text>
+          <Text bold>{s.advisor}</Text>
+          <Text color={adv.status === 'consulting' ? colorOf('careful') : 'green'}>{adv.status === 'consulting' ? '●' : '✓'}</Text>
+        </Box>
+        <Text dimColor wrap="truncate-end">
+          {'  '}
+          {advisorLine(adv, at)}
+        </Text>
+      </Box>
+    )
+
     return (
       <Box flexDirection="column">
         <Box flexDirection="row" justifyContent="space-between">
@@ -980,6 +1278,10 @@ export const register: Register = (on, options) => {
         <Text dimColor>
           ≈{fmtCost(t.cost)} · {fmtTokens(t.tokens)} {s.tokensWord} · {fmtTime(t.time)}
         </Text>
+        <Box flexDirection="column" marginTop={1}>
+          {mainRow}
+          {advisorRow}
+        </Box>
         {p.isCompact ? (
           <Text wrap="truncate-end">
             {[...running, ...finished].map(a => (
@@ -1023,14 +1325,21 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const f = await read($, flow)
+    const own = await read($, flow)
+    const m = await read($, main)
+    // No flow: the main agent's own steps get the same bar while it works.
+    const f: Flow | null =
+      own ??
+      (m.stepTotal && m.status === 'working'
+        ? { ...blank(), title: m.stepNote || 'Main agent', total: m.stepTotal, done: Math.min(m.stepTotal, m.stepDone ?? 0), phase: 'delegate' }
+        : null)
     if (f === null || e.props.hasSurvey) return next(e)
 
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
     const list = await read($, agents)
     const crew = list.length + plannedOf(f, list).length
-    const isWorking = list.some(a => a.status === 'running')
+    const isWorking = list.some(a => a.status === 'running') || (own === null && m.status === 'working')
     const crewButton = (
       <Button key="savvy-agents" label={`×${crew}`} plain onPress={() => void togglePane($)} />
     )
@@ -1041,7 +1350,11 @@ export const register: Register = (on, options) => {
         label="✕"
         plain
         role="dismiss"
-        onPress={() => update($, flow, () => null)}
+        onPress={() =>
+          own === null
+            ? update($, main, prev => ({ ...prev, stepDone: undefined, stepTotal: undefined, stepNote: undefined }))
+            : update($, flow, () => null)
+        }
       />
     )
 
